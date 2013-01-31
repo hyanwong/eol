@@ -716,31 +716,6 @@ class DataObject < ActiveRecord::Base
     return nil
   end
   
-  # will return the class name and label used to generate the colored box showing
-  # this object's curation status: Green/Trusted, Gray/Unreviewed, Red/Untrusted, Red/Hidden
-  # or if none available: nil, nil
-  def status_class_and_label_by_taxon_concept(taxon_concept)
-    if best_association = association_with_exact_or_best_vetted_status(taxon_concept)
-      if best_association.visibility == Visibility.invisible
-        return 'untrusted', I18n.t(:hidden)
-      else
-        status_class = case best_association.vetted
-          when Vetted.unknown       then 'unknown'
-          when Vetted.untrusted     then 'untrusted'
-          when Vetted.trusted       then 'trusted'
-          when Vetted.inappropriate then 'inappropriate'
-          else nil
-        end
-        status_label = case best_association.vetted
-          when Vetted.unknown then I18n.t(:unreviewed)
-          else best_association.vetted.label
-        end
-        return status_class, status_label
-      end
-    end
-    return nil, nil
-  end
-
   # To retrieve the reasons provided while untrusting or hiding an association
   def reasons(hierarchy_entry, activity)
     if hierarchy_entry.class == UsersDataObject
@@ -870,10 +845,10 @@ class DataObject < ActiveRecord::Base
 
   # NOTE - if you plan on calling this, you are behooved by adding object_title and data_type_id to your selects.
   def best_title
-    return safe_object_title unless safe_object_title.blank?
-    return toc_items.first.label unless toc_items.blank?
-    return safe_data_type.simple_type if safe_data_type
-    return I18n.t(:unknown_data_object_title)
+    return safe_object_title.html_safe unless safe_object_title.blank?
+    return toc_items.first.label.html_safe unless toc_items.blank?
+    return safe_data_type.simple_type.html_safe if safe_data_type
+    return I18n.t(:unknown_data_object_title).html_safe
   end
   alias :summary_name :best_title
 
@@ -1075,8 +1050,11 @@ class DataObject < ActiveRecord::Base
       :select => {
         :languages => '*',
         :data_objects => default_selects | options[:select] } )
-    data_objects.collect! do |d|
-      if latest_version = d.latest_version_in_language(options[:language_id], :check_only_published => false)
+    data_objects.map! do |d|
+      # TODO - just use compact instead of this? ...Unfortunately, as-is, it looks like nils are passed through...
+      next if d.nil?
+      # NOTE - I changed this from "false", below... was this a problem?
+      if latest_version = d.latest_version_in_language(options[:language_id] || d.language_id, :check_only_published => true)
         d = latest_version
       end
       d.is_the_latest_published_revision = true
@@ -1139,6 +1117,10 @@ class DataObject < ActiveRecord::Base
   def average_rating
     return 2.5 if users_data_objects_ratings.blank?
     rating_summary.collect{ |score, votes| score * votes }.inject(:+) / total_ratings.to_f
+  end
+
+  def show_rights_holder?
+    license && license.show_rights_holder?
   end
 
 private
@@ -1230,7 +1212,7 @@ private
   end
   
   def rights_required?
-    ! license.is_public_domain?
+    license.show_rights_holder?
   end
 
 end

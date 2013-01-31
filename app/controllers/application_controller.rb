@@ -7,12 +7,11 @@ class ApplicationController < ActionController::Base
     rescue_from EOL::Exceptions::SecurityViolation, EOL::Exceptions::MustBeLoggedIn, :with => :rescue_from_exception
   end
 
-  before_filter :original_request_params # store unmodified copy of request params
-  before_filter :global_warning
-  before_filter :check_if_mobile if $ENABLE_MOBILE
-  before_filter :clear_any_logged_in_session unless $ALLOW_USER_LOGINS
-  before_filter :check_user_agreed_with_terms, :except => :error
-  before_filter :set_locale
+  before_filter :original_request_params, :except => [ :fetch_external_page_title ] # store unmodified copy of request params
+  before_filter :global_warning, :except => [ :fetch_external_page_title ]
+  before_filter :clear_any_logged_in_session, :except => [ :fetch_external_page_title ] unless $ALLOW_USER_LOGINS
+  before_filter :check_user_agreed_with_terms, :except => [ :fetch_external_page_title, :error ]
+  before_filter :set_locale, :except => [ :fetch_external_page_title ]
 
   prepend_before_filter :redirect_to_http_if_https
   prepend_before_filter :keep_home_page_fresh
@@ -435,6 +434,42 @@ class ApplicationController < ActionController::Base
     rescue_action_in_public(exception)
   end
 
+  def fetch_external_page_title
+    data = {}
+    success = nil
+    response_title = nil
+    begin
+      response = Net::HTTP.get_response(URI.parse(params[:url]))
+      if (response.code == "301" || response.code == "302" || response.code == "303") && response.kind_of?(Net::HTTPRedirection)
+        response = Net::HTTP.get_response(URI.parse(response['location']))
+      end
+      if response.code == "200"
+        response_body = response.body
+        if response['Content-Encoding'] == "gzip"
+          response_body = ActiveSupport::Gzip.decompress(response.body)
+        end
+        success = true
+        if matches = response_body.match(/<title>(.*?)<\/title>/ims)
+          response_title = matches[1].strip
+        end
+      end
+    rescue Exception => e
+    end
+    if success
+      if response_title
+        data['exception'] = false
+        data['message'] = response_title
+      else
+        data['exception'] = true
+        data['message'] = I18n.t(:unable_to_determine_title)
+      end
+    else
+      data['exception'] = true
+      data['message'] = I18n.t(:url_not_accessible)
+    end
+    render :text => data.to_json
+  end
+
 protected
 
   # Overrides ActionController::Rescue local_request? to allow custom configuration of which IP addresses
@@ -568,14 +603,33 @@ protected
     @meta_open_graph_image_url ||= nil
   end
 
+  # You should pass in :for (the object page you're on), :paginated (a collection of WillPaginate results), and
+  # :url_method (to the object's page--don't use *_path, use *_url).
+  def set_canonical_urls(options = {})
+    page = rel_canonical_href_page_number(options[:paginated])
+    parameters = []
+    if options[:for].is_a? Hash
+      parameters << options[:for].merge(:page => page)
+    else
+      parameters << options[:for] if options[:for]
+      parameters << {:page => page}
+    end
+    @rel_canonical_href = self.send(options[:url_method], *parameters)
+    @rel_prev_href = rel_prev_href_params(options[:paginated]) ?
+      self.send(options[:url_method], @rel_prev_href_params) : nil
+    @rel_next_href = rel_next_href_params(options[:paginated]) ?
+      self.send(options[:url_method], @rel_next_href_params) : nil
+  end
+
   # rel canonical only cares about page param for paginated records with current_page greater than 1
   def rel_canonical_href_page_number(records)
     @rel_canonical_href_page_number ||= records.is_a?(WillPaginate::Collection) && records.current_page > 1 ?
       records.current_page : nil
   end
 
-  # rel prev href needs the current request params with current page number swapped out for the number of the previous page
-  # return nil if there is no previous page
+  # rel prev href needs the current request params with current page number swapped out for the number of the
+  # previous page; return nil if there is no previous page
+  # NOTE - original_params is *never* passed in.
   def rel_prev_href_params(records, original_params = original_request_params.clone)
     @rel_prev_href_params ||= records.is_a?(WillPaginate::Collection) && records.previous_page ?
       original_params.merge({ :page => records.previous_page }) : nil

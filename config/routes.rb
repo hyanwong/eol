@@ -68,6 +68,7 @@ Eol::Application.routes.draw do
           get 'common_names'
           get 'related_names'
           get 'synonyms'
+          get 'delete'
         end
         member do
           get 'vet_common_name'
@@ -229,7 +230,6 @@ Eol::Application.routes.draw do
       get 'recover_account'
       post 'recover_account'
       get 'verify_open_authentication'
-      get 'fetch_external_page_title'
     end
     resource :newsfeed, :only => [:show], :controller => 'users/newsfeeds' do
       collection do
@@ -317,6 +317,14 @@ Eol::Application.routes.draw do
     resources :translated_news_items, :as => :translations, :except => [:show, :index]
   end
 
+  resource :content_cron_tasks do
+    member do
+      get 'submit_flickr_comments'
+      get 'submit_flickr_curator_actions'
+      get 'send_monthly_partner_stats_notification'
+    end
+  end
+
   # Putting these after the complex resources because they are less common.
   resources :tasks, :task_states, :task_names, :feed_items, :random_images
   resources :recent_activities, :only => [:index]
@@ -342,6 +350,7 @@ Eol::Application.routes.draw do
   # Named application routes:
   match '/set_language' => 'application#set_language', :as => 'set_language'
   match '/external_link' => 'application#external_link', :as => 'external_link'
+  match '/fetch_external_page_title' => 'application#fetch_external_page_title', :as => 'fetch_external_page_title'
 
   # Named content routes:
   match '/preview' => 'content#preview', :as => 'preview'

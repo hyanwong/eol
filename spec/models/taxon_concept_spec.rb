@@ -158,16 +158,6 @@ describe TaxonConcept do
     @taxon_concept.comments.find_all {|comment| comment.visible? }.map(&:body).should == [@comment_1, @comment_2] # Order DOES matter, now.
   end
 
-  it 'should be able to show a table of contents' do
-    # Tricky, tricky. See, we add special things to the TOC like "Common Names" and "Search the Web", when they are
-    # appropriate.  I could test for those here, but that seems the perview of TocItem.  So, I'm only checking the
-    # first three elements:
-    user = User.gen
-    text = @taxon_concept.details_text_for_user(user)
-    toc_items_to_show = @taxon_concept.table_of_contents_for_text(text)
-    toc_items_to_show[0..3].should == [@overview, @testy[:brief_summary], @toc_item_2, @toc_item_3]
-  end
-
   it 'should have images and videos in #media' do
     @taxon_concept.data_objects_from_solr(@taxon_media_parameters).map(&:description).should include(@video_1_text)
     @taxon_concept.data_objects_from_solr(@taxon_media_parameters).map(&:object_cache_url).should include(@testy[:image_1])
@@ -176,6 +166,19 @@ describe TaxonConcept do
   it 'should show its untrusted images, by default' do
     @taxon_concept.current_user = nil
     @taxon_concept.images_from_solr(100).map {|d| DataObject.find(d).object_cache_url }.should include(@image_unknown_trust)
+  end
+
+  it 'should not throw an error if there are activity logs with user ID 0' do
+    # creating a curator activity log with user_id = 0
+    l = CuratorActivityLog.gen(
+      :user_id => 0,
+      :changeable_object_type => ChangeableObjectType.data_object,
+      :target_id => @taxon_concept.data_objects.last.id,
+      :taxon_concept => @taxon_concept,
+      :activity => Activity.trusted)
+    lambda { @taxon_concept.data_object_curators }.should_not raise_error
+    @taxon_concept.data_object_curators.should == []
+    l.destroy
   end
 
   describe '#overview_text_for_user' do
@@ -226,12 +229,22 @@ describe TaxonConcept do
     results.count.should == 2
   end
 
+  # TODO - this doesn't express the difference between #all_common_names and #common_names... the latter filters out
+  # duplicates and entries with unknown languages...
   it "should have common names" do
     @taxon_concept.all_common_names.length.should > 0
+    @taxon_concept.all_common_names.should include(@testy[:common_name])
+    @taxon_concept.all_common_names.should_not include(@testy[:scientific_name])
   end
 
-  it "should not have common names" do
+  it "should not have common names when there are none" do
     @tc_with_no_common_names.all_common_names.length.should == 0
+  end
+
+  it "should have scientific names" do
+    @taxon_concept.all_scientific_names.length.should > 0
+    @taxon_concept.all_scientific_names.should include(@testy[:scientific_name])
+    @taxon_concept.all_scientific_names.should_not include(@testy[:common_name])
   end
 
   it "should be able to filter common_names by taxon_concept or hierarchy_entry" do
@@ -243,16 +256,6 @@ describe TaxonConcept do
     taxon_concept_name = TaxonConceptName.gen(:vern => 1, :source_hierarchy_entry_id => hierarchy_entry.id, :taxon_concept_id => @taxon_concept.id)
     common_names = @taxon_concept.common_names(:hierarchy_entry_id => hierarchy_entry.id)
     common_names.count.should > 0
-  end
-
-  it "should be able to filter related_names by taxon_concept or hierarchy_entry" do
-    # by taxon_concept
-    related_names = TaxonConcept.related_names(:taxon_concept_id => @taxon_concept.id)
-    related_names.class.should == Hash
-    # by hierarchy_entry
-    hierarchy_entry = @taxon_concept.published_browsable_hierarchy_entries.first
-    related_names = TaxonConcept.related_names(:hierarchy_entry_id => hierarchy_entry.id)
-    related_names.class.should == Hash
   end
 
   it "should be able to filter synonyms by taxon_concept or hierarchy_entry" do
@@ -556,15 +559,36 @@ describe TaxonConcept do
     @testy[:has_one_hidden_image].exemplar_or_best_image_from_solr.should be_nil
   end
 
+  it 'should not return unpublished images as examplars' do
+    best_image = @testy[:has_one_image].exemplar_or_best_image_from_solr
+    best_image.published?.should == true
+    best_image.update_attribute('published', 0)
+    @testy[:has_one_image].reload
+    # when the best image is unpublished it should not be returned. At this point Solr hasn't been
+    # updated so it still things best_image is the best, but the code will check its published
+    # status, look for a later version, and if none exists then return nil
+    @testy[:has_one_image].exemplar_or_best_image_from_solr.should == nil
+
+    newer_version = DataObject.gen(:guid => best_image.guid, :language_id => best_image.language_id, :published => true)
+    @testy[:has_one_image].reload
+    # here Solr will return the original object, but then we will find the latest published version of it
+    @testy[:has_one_image].exemplar_or_best_image_from_solr.should == newer_version
+    newer_version.destroy
+    best_image.update_attribute('published', 1)
+    @testy[:has_one_image].reload
+  end
+
+  # TODO: this should be moved to the TaxaPage spec
   it 'should show details text with no language only to users in the default language' do
     user = User.gen(:language => Language.default)
-    @taxon_concept.details_text_for_user(user).first.language_id.should == Language.default.id
-    best_text = @testy[:no_language_in_toc].details_text_for_user(user).first
-    best_text.language_id.should == 0
+    taxon_page = TaxonPage.new(@taxon_concept, user)
+    taxon_page.details.first.language_id.should == Language.default.id
+    taxon_page = TaxonPage.new(@testy[:no_language_in_toc], user)
+    taxon_page.details.first.language_id.should == 0
 
     user = User.gen(:language => Language.find_by_iso_639_1('fr'))
-    new_best_text = @testy[:no_language_in_toc].overview_text_for_user(user)
-    new_best_text.should be_nil
+    taxon_page = TaxonPage.new(@testy[:no_language_in_toc], user)
+    taxon_page.details.should be_nil
   end
 
   it 'should show overview text with no language only to users in the default language' do
